@@ -756,30 +756,54 @@ Object pair(s):
             self.update_node()
             self.update_edge()
     
-    def get_llm_response(self, prompt):
-        response = ollama.chat(
-            model=self.llm_name,
-            messages=[{
-                'role': 'user',
-                'content': prompt,
-            }]
-        )
-        return response.message.content
+    def get_llm_response(self, prompt, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                response = ollama.chat(
+                    model=self.llm_name,
+                    messages=[{
+                        'role': 'user',
+                        'content': prompt,
+                    }],
+                    options={'num_ctx': 4096}
+                )
+                return response.message.content
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[WARNING] ollama.chat failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {wait}s...")
+                    import time
+                    time.sleep(wait)
+                else:
+                    print(f"[ERROR] ollama.chat failed after {max_retries} attempts: {e}")
+                    raise
     
-    def get_vlm_response(self, prompt, image):
+    def get_vlm_response(self, prompt, image, max_retries=3):
         buffered = BytesIO()
         image.save(buffered, format='PNG')
         image_bytes = base64.b64encode(buffered.getvalue())
         image_str = str(image_bytes, 'utf-8')
-        response = ollama.chat(
-            model=self.vlm_name,
-            messages=[{
-                'role': 'user',
-                'content': prompt,
-                'images': [image_str]
-            }]
-        )
-        return response.message.content
+        for attempt in range(max_retries):
+            try:
+                response = ollama.chat(
+                    model=self.vlm_name,
+                    messages=[{
+                        'role': 'user',
+                        'content': prompt,
+                        'images': [image_str]
+                    }],
+                    options={'num_ctx': 4096}
+                )
+                return response.message.content
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[WARNING] ollama.chat (VLM) failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {wait}s...")
+                    import time
+                    time.sleep(wait)
+                else:
+                    print(f"[ERROR] ollama.chat (VLM) failed after {max_retries} attempts: {e}")
+                    raise
         
     def find_modes(self, lst):  
         if len(lst) == 0:

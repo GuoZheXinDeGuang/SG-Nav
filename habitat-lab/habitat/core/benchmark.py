@@ -198,6 +198,40 @@ class Benchmark:
                     # write each item on a new line
                     fp.write("%s\n" % item)
 
+            # Save per-episode and per-category JSON results
+            import json
+            from collections import defaultdict as _defaultdict
+
+            # Per-category accumulation
+            cat_metrics = _defaultdict(lambda: {'count': 0, 'success': 0, 'spl': 0.0, 'softspl': 0.0, 'distance_to_goal': 0.0})
+            for ep in all_metrics:
+                cat = ep.get('goal', 'unknown')
+                cat_metrics[cat]['count'] += 1
+                cat_metrics[cat]['success'] += ep.get('success', 0.0)
+                cat_metrics[cat]['spl'] += ep.get('spl', 0.0)
+                cat_metrics[cat]['softspl'] += ep.get('softspl', 0.0)
+                cat_metrics[cat]['distance_to_goal'] += ep.get('distance_to_goal', 0.0)
+
+            cat_summary = {}
+            for cat, vals in cat_metrics.items():
+                n = vals['count']
+                cat_summary[cat] = {
+                    'count': n,
+                    'success_rate': vals['success'] / n if n else 0,
+                    'avg_spl': vals['spl'] / n if n else 0,
+                    'avg_softspl': vals['softspl'] / n if n else 0,
+                    'avg_distance_to_goal': vals['distance_to_goal'] / n if n else 0,
+                }
+
+            json_out = {
+                'total_episodes': count_episodes,
+                'overall': {k: v / count_episodes for k, v in agg_metrics.items() if not isinstance(v, dict)},
+                'per_category': cat_summary,
+                'per_episode': [{k: (v if not isinstance(v, float) else round(v, 6)) for k, v in ep.items()} for ep in all_metrics],
+            }
+            with open(f'data/results/{experiment_name}/benchmark.json', 'w') as fp:
+                json.dump(json_out, fp, indent=2, default=str)
+
             
             
             

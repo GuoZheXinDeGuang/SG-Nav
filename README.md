@@ -87,7 +87,7 @@ Install pytorch<=1.9, pytorch3d and faiss. Install other packages.
 conda install -c pytorch faiss-gpu=1.8.0
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 -f https://download.pytorch.org/whl/torch_stable.html
 pip install -r requirements.txt
-pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+conda install pytorch::pytorch pytorch::torchvision pytorch::pytorch-cuda=11.8 pytorch3d::pytorch3d -c pytorch -c nvidia -c pytorch3d -c conda-forge
 ```
 
 Install Grounded SAM.
