@@ -158,6 +158,9 @@ class SceneGraph():
         self.init_room_nodes()
         self.reason_visualization = ''
         self.is_navigation = is_navigation
+        self.goal_room = None              # room constraint (e.g., 'bedroom')
+        self.room_boost_alpha = 2.0        # boost strength (for optional Change 5)
+        self.room_boost_sigma = 2.0        # spatial decay scale in meters
         self.llm_name = 'llama3.2-vision'
         self.vlm_name = 'llama3.2-vision'
         self.seg_xyxy = None
@@ -222,6 +225,7 @@ Object pair(s):
         self.edge_text = ''
         self.edge_list = []
         self.reason_visualization = ''
+        self.goal_room = None  # reset per episode
 
     def set_cfg(self):
         cfg = {'dataset_config': PosixPath('tools/replica.yaml'), 'scene_id': 'room0', 'start': 0, 'end': -1, 'stride': 5, 'image_height': 680, 'image_width': 1200, 'gsa_variant': 'none', 'detection_folder_name': 'gsa_detections_${gsa_variant}', 'det_vis_folder_name': 'gsa_vis_${gsa_variant}', 'color_file_name': 'gsa_classes_${gsa_variant}', 'device': 'cuda', 'use_iou': True, 'spatial_sim_type': 'overlap', 'phys_bias': 0.0, 'match_method': 'sim_sum', 'semantic_threshold': 0.5, 'physical_threshold': 0.5, 'sim_threshold': 1.2, 'use_contain_number': False, 'contain_area_thresh': 0.95, 'contain_mismatch_penalty': 0.5, 'mask_area_threshold': 25, 'mask_conf_threshold': 0.95, 'max_bbox_area_ratio': 0.5, 'skip_bg': True, 'min_points_threshold': 16, 'downsample_voxel_size': 0.025, 'dbscan_remove_noise': True, 'dbscan_eps': 0.1, 'dbscan_min_points': 10, 'obj_min_points': 0, 'obj_min_detections': 3, 'merge_overlap_thresh': 0.7, 'merge_visual_sim_thresh': 0.8, 'merge_text_sim_thresh': 0.8, 'denoise_interval': 20, 'filter_interval': -1, 'merge_interval': 20, 'save_pcd': True, 'save_suffix': 'overlap_maskconf0.95_simsum1.2_dbscan.1_merge20_masksub', 'vis_render': False, 'debug_render': False, 'class_agnostic': True, 'save_objects_all_frames': True, 'render_camera_path': 'replica_room0.json', 'max_num_points': 512}
@@ -239,6 +243,9 @@ Object pair(s):
         self.obj_goal_sg = obj_goal_sg
         if self.obj_goal in self.threshold_list:
             self.cfg.obj_min_detections = self.threshold_list[self.obj_goal]
+
+    def set_room_goal(self,goal_room):
+        self.goal_room = goal_room
 
     def set_navigate_steps(self, navigate_steps):
         self.navigate_steps = navigate_steps
@@ -720,33 +727,85 @@ Object pair(s):
                     group_node.get_graph()
                     room_node.group_nodes.append(group_node)
 
+    # def insert_goal(self, goal=None):
+    #     if goal is None:
+    #         goal = self.obj_goal_sg
+    #     self.update_group()
+    #     room_node_text = ''
+    #     for room_node in self.room_nodes:
+    #         if len(room_node.group_nodes) > 0:
+    #             room_node_text = room_node_text + room_node.caption + ','
+    #     # room_node_text[-2] = '.'
+    #     if room_node_text == '':
+    #         return None
+    #     prompt = self.prompt_room_predict.format(goal, room_node_text)
+    #     response = self.get_llm_response(prompt=prompt)
+    #     response = response.lower()
+    #     predict_room_node = None
+    #     for room_node in self.room_nodes:
+    #         if len(room_node.group_nodes) > 0 and room_node.caption.lower() in response:
+    #             predict_room_node = room_node
+    #     if predict_room_node is None:
+    #         return None
+    #     for group_node in predict_room_node.group_nodes:
+    #         corr_score = self.graph_corr(goal, group_node)
+    #         group_node.corr_score = corr_score
+    #     sorted_group_nodes = sorted(predict_room_node.group_nodes)
+    #     self.mid_term_goal = sorted_group_nodes[-1].center
+    #     return self.mid_term_goal
     def insert_goal(self, goal=None):
         if goal is None:
             goal = self.obj_goal_sg
         self.update_group()
+        
+        # Collect all discovered rooms (those with group_nodes assigned)
         room_node_text = ''
         for room_node in self.room_nodes:
             if len(room_node.group_nodes) > 0:
                 room_node_text = room_node_text + room_node.caption + ','
-        # room_node_text[-2] = '.'
+        
         if room_node_text == '':
             return None
-        prompt = self.prompt_room_predict.format(goal, room_node_text)
-        response = self.get_llm_response(prompt=prompt)
-        response = response.lower()
+        
+        # --- SR-ObjectNav-L1 extension: use explicit room constraint if given ---
         predict_room_node = None
-        for room_node in self.room_nodes:
-            if len(room_node.group_nodes) > 0 and room_node.caption.lower() in response:
-                predict_room_node = room_node
-        if predict_room_node is None:
-            return None
+        
+        if self.goal_room is not None:
+            # Direct lookup: find the room node matching the user's constraint
+            target_room_lower = self.goal_room.lower().strip()
+            for room_node in self.room_nodes:
+                if (len(room_node.group_nodes) > 0 
+                    and room_node.caption.lower() == target_room_lower):
+                    predict_room_node = room_node
+                    break
+            
+            # Constrained room not yet discovered. 
+            # Return None so the agent continues exploration via Layer 1 & 2 scoring
+            # (they still include room co-occurrence signals).
+            if predict_room_node is None:
+                return None
+        else:
+            # --- ORIGINAL behavior: ask LLM which room contains the goal ---
+            prompt = self.prompt_room_predict.format(goal, room_node_text)
+            response = self.get_llm_response(prompt=prompt)
+            response = response.lower()
+            for room_node in self.room_nodes:
+                if (len(room_node.group_nodes) > 0 
+                    and room_node.caption.lower() in response):
+                    predict_room_node = room_node
+            if predict_room_node is None:
+                return None
+        # --- end of extension ---
+        
+        # Score all group nodes in the selected room via graph_corr (unchanged)
         for group_node in predict_room_node.group_nodes:
             corr_score = self.graph_corr(goal, group_node)
             group_node.corr_score = corr_score
+        
         sorted_group_nodes = sorted(predict_room_node.group_nodes)
         self.mid_term_goal = sorted_group_nodes[-1].center
+        
         return self.mid_term_goal
-    
     def update_scenegraph(self):
         print(f'Navigate Step: {self.navigate_steps}', end='\r')
         self.segment2d()
@@ -866,7 +925,33 @@ Object pair(s):
             score[distance > 32] = 0
             score = score / distance
             scores += score
+        
+        # --- SR-ObjectNav-L1 extension: explicit room-aware boost ---
+        if self.goal_room is not None and self.goal_room in self.rooms:
+            room_idx = self.rooms.index(self.goal_room)
+            # Convert sigma from meters to map cells (map_resolution is cm/cell)
+            # sigma_cells = sigma_meters * 100 / map_resolution
+            # Note: frontier coords are in map-cell units, so we compute distances 
+            # to the target room's room_map activation peaks
+            
+            # Find all cells where target room is detected
+            target_room_map = self.agent.room_map[0, room_idx].cpu().numpy()
+            
+            for i, loc in enumerate(frontier_locations_16):
+                # Soft proximity: check a local neighborhood
+                window = 12  # ~60 cm radius at map_resolution=5cm
+                y0 = max(0, loc[0] - window)
+                y1 = min(self.agent.map_size - 1, loc[0] + window + 1)
+                x0 = max(0, loc[1] - window)
+                x1 = min(self.agent.map_size - 1, loc[1] + window + 1)
+                sub = target_room_map[y0:y1, x0:x1]
+                
+                room_presence = float(sub.max())  # 0 if no target-room detection here
+                scores[i] += self.room_boost_alpha * room_presence
+        # --- end extension ---
+
         return scores
+       
 
     def discriminate_relation(self, edge):
         image = self.get_joint_image(edge.node1, edge.node2)

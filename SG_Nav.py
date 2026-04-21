@@ -136,7 +136,6 @@ class SG_Nav_Agent():
             self.experiment_name = self.experiment_name + f'/[{self.args.split_l}:{self.args.split_r}]'
 
         self.visualization_dir = f'data/visualization/{self.experiment_name}/'
-
         print('scene graph module init finish!!!')
 
     def add_predicates(self, model):
@@ -205,6 +204,15 @@ class SG_Nav_Agent():
             self.obj_goal_sg = 'drawers'
         elif self.obj_goal == 'tv_monitor':
             self.obj_goal_sg = 'tv'
+        # --- SR-ObjectNav-L1 extension: read optional room constraint from episode ---
+        episode = self.simulator._env.current_episode
+        info = getattr(episode, 'info', None)
+        if info is None:
+            self.goal_room = None
+        elif isinstance(info, dict):
+            self.goal_room = info.get('room_constraint')
+        else:
+            self.goal_room = getattr(info, 'room_constraint', None)
         self.current_obj_predictions = []
         self.obj_locations = [[] for i in range(21)]
         self.not_move_steps = 0
@@ -370,6 +378,7 @@ class SG_Nav_Agent():
         self.scenegraph.set_agent(self)
         self.scenegraph.set_navigate_steps(self.navigate_steps)
         self.scenegraph.set_obj_goal(self.obj_goal, self.obj_goal_sg)
+        self.scenegraph.set_goal_room(self.goal_room)
         self.scenegraph.set_room_map(self.room_map)
         self.scenegraph.set_fbe_free_map(self.fbe_free_map)
         self.scenegraph.set_observations(observations)

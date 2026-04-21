@@ -121,6 +121,20 @@ Run SG-Nav:
 python SG_Nav.py --visualize
 ```
 
+## How to do the new track?
+
+After you have installed all the dependancies, please do the following:
+1. Change the path of the config file into your own path
+2. Run the script to generate scenes that contains object paired with room conditions: 
+```bash
+python generate_sr_episodes.py
+zcat data/sr_objectnav_l1/val.json.gz | python -m json.tool | head -50
+```
+3. Run the following to get the evaluation:
+```bash
+python evaluate_sr_l1.py --output data/results/room_aware.json
+```
+
 ## Citation
 ```
 @article{yin2024sgnav, 
