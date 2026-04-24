@@ -196,8 +196,10 @@ class SG_Nav_Agent():
         self.loop_time = 0
         self.last_segment_num = 0
         self.metrics = {'distance_to_goal': 0., 'spl': 0., 'softspl': 0.}
-        self.obj_goal = self.simulator._env.current_episode.object_category
-        self.obj_goal_sg = self.simulator._env.current_episode.object_category
+        # self.obj_goal = self.simulator._env.current_episode.object_category
+        # self.obj_goal_sg = self.simulator._env.current_episode.object_category
+        self.obj_goal = self.simulator.current_episode.object_category
+        self.obj_goal_sg = self.simulator.current_episode.object_category
         if self.obj_goal == 'gym_equipment':
             self.obj_goal_sg = 'treadmill. fitness equipment.'
         elif self.obj_goal == 'chest_of_drawers':
@@ -205,7 +207,8 @@ class SG_Nav_Agent():
         elif self.obj_goal == 'tv_monitor':
             self.obj_goal_sg = 'tv'
         # --- SR-ObjectNav-L1 extension: read optional room constraint from episode ---
-        episode = self.simulator._env.current_episode
+        # episode = self.simulator._env.current_episode
+        episode = self.simulator.current_episode
         info = getattr(episode, 'info', None)
         if info is None:
             self.goal_room = None
@@ -226,6 +229,16 @@ class SG_Nav_Agent():
         self.explanation = ''
         self.text_node = ''
         self.text_edge = ''
+
+        # [SR-L1 P1-A] sanity log: verify the room_constraint string actually
+        # matches one of SG-Nav's internal GLIP room categories. If this prints
+        # False, every downstream room-aware branch is silently skipped.
+        if self.goal_room is not None:
+            print(f"[SR-L1] episode goal: {self.obj_goal} in room: "
+                  f"{self.goal_room!r}, room in self.rooms: "
+                  f"{self.goal_room in self.rooms}")
+        else:
+            print(f"[SR-L1] episode goal: {self.obj_goal} (no room constraint)")
 
         self.scenegraph.reset()
         
@@ -275,6 +288,19 @@ class SG_Nav_Agent():
                 goal_mask = [segment2d_result['mask'][index] for index in indices]
             if len(goal_mask) > 0:
                 possible_goal_detected_before = copy.deepcopy(self.found_possible_goal)
+
+                # -------------------------
+                # [SR-L1 P0-B] Room-filter at detection time REMOVED.
+                # Previously we dropped masks whose projected position fell
+                # outside the goal_room's room_map activation. This was too
+                # aggressive: room_map activations require multiple confident
+                # GLIP room detections, so a goal seen *inside* the correct
+                # room was often discarded and the agent wandered. Room-
+                # awareness is now handled entirely by (a) the multiplicative
+                # frontier boost in scenegraph.score, and (b) the final
+                # Room-Success check at evaluation time.
+                # -------------------------
+
                 for mask in goal_mask:
                     center_point = torch.tensor(np.argwhere(mask).mean(axis=0).astype(int))
                     center_point = torch.tensor([center_point[1], center_point[0]])
@@ -291,11 +317,60 @@ class SG_Nav_Agent():
                     if temp_distance >= self.distance_threshold:
                         self.found_possible_goal = True
                     else:
-                        if self.found_goal:
-                            if temp_distance < self.distance_threshold:
-                                self.found_goal_times = self.found_goal_times + 1
-                        self.found_goal = True
-                        self.found_possible_goal = False
+                        # [SR-L1 P0-D] Room-gated STOP. Near-range detection
+                        # would normally upgrade to found_goal and trigger
+                        # navigate-and-stop. But P0-B removed the hard room
+                        # filter, so without this gate the agent will happily
+                        # STOP at a distractor (chair in the living room when
+                        # we asked for chair in bedroom). We don't fall back
+                        # to the old "drop the mask" behavior, because that
+                        # ruined ep_0 last time. Instead: demote to
+                        # found_possible_goal, which makes the agent approach
+                        # the object (letting it verify room context), then
+                        # line 524 clears the flag on arrival and fbe takes
+                        # over with the room-aware boost active.
+                        #
+                        # Only demote when we have positive evidence the goal
+                        # is in the WRONG room. If goal_room has no activation
+                        # yet anywhere on the map, don't demote — the room
+                        # just hasn't been seen clearly, and the object
+                        # itself is often our best cue toward it.
+                        # [SR-L1 P0-D rev2] Tighter gate: demote whenever
+                        # room_map has ANY activation (some room has been
+                        # recognized somewhere) AND the target room is not
+                        # active at the object's projected location.
+                        # Rev1 only demoted when the TARGET room had been
+                        # seen somewhere — but when agent starts in a
+                        # non-goal room and detects a distractor there in
+                        # the first few dozen steps, the target room hasn't
+                        # been observed yet, so rev1 let the agent STOP at
+                        # the distractor (the 235-step failure mode).
+                        demote = False
+                        if self.goal_room is not None and self.goal_room in self.rooms:
+                            room_idx = self.rooms.index(self.goal_room)
+                            if self.room_map[0].max().item() > 0:
+                                # Project the detected object to map coords
+                                obj_gps = self.get_goal_gps(
+                                    observations, temp_direction, temp_distance)
+                                map_x = int(self.map_size_cm/10 + obj_gps[0]*100/self.resolution)
+                                map_y = int(self.map_size_cm/10 + obj_gps[1]*100/self.resolution)
+                                if 0 <= map_x < self.map_size and 0 <= map_y < self.map_size:
+                                    window = 10
+                                    y0, y1 = max(0, map_y - window), min(self.map_size - 1, map_y + window + 1)
+                                    x0, x1 = max(0, map_x - window), min(self.map_size - 1, map_x + window + 1)
+                                    if self.room_map[0, room_idx, y0:y1, x0:x1].max().item() <= 0:
+                                        demote = True
+                                else:
+                                    demote = True
+
+                        if demote:
+                            self.found_possible_goal = True
+                        else:
+                            if self.found_goal:
+                                if temp_distance < self.distance_threshold:
+                                    self.found_goal_times = self.found_goal_times + 1
+                            self.found_goal = True
+                            self.found_possible_goal = False
                     
                     ## select the closest goal
                     direction = temp_direction
@@ -324,6 +399,14 @@ class SG_Nav_Agent():
                     temp_direction = (center_point[0] - 320) * 79 / 640
                     temp_distance = self.depth[center_point[1],center_point[0],0]
                     goal_gps = self.get_goal_gps(observations, temp_direction, temp_distance)
+                    
+                    # -----------------------
+                    # [SR-L1 P0-B] Room-filter at detection time REMOVED.
+                    # See segment2d branch above for rationale. We no longer
+                    # `continue` on room mismatch — the frontier boost steers
+                    # exploration, evaluation checks the stopping room.
+                    # -----------------------
+
                     k = 0
                     pos_neg = 1
                     while temp_distance >= 100 and 0<center_point[1]+int(pos_neg*k)<479 and 0<center_point[0]+int(pos_neg*k)<639:
@@ -335,14 +418,49 @@ class SG_Nav_Agent():
                     if temp_distance >= self.distance_threshold:
                         self.found_possible_goal = True
                     else:
-                        thres = int(self.goal_merge_threshold * 100 / self.map_resolution)
-                        if 0 <= int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) < self.map_size and 0 <= int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) < self.map_size:
-                            goal_gps_map_local = self.goal_gps_map[max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) + thres, self.map_size - 1), max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) + thres, self.map_size - 1)]
-                            if goal_gps_map_local.max() > 0:
-                                goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] = goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] + 1
-                            else:
-                                self.goal_gps_map[min(max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution), 0), self.map_size), min(max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution), 0), self.map_size)] = 1
-                        self.found_possible_goal = False
+                        # [SR-L1 P0-D] Room-gated vote. This branch accumulates
+                        # per-detection votes in goal_gps_map; once a cell
+                        # reaches obj_min_detections, found_goal flips True
+                        # and the agent navigates-and-stops. Gate that vote
+                        # on room context so distractors (e.g. chair in
+                        # living room when we asked for chair in bedroom)
+                        # don't pile up into a STOP. Same policy as the
+                        # segment2d branch: only demote when we have positive
+                        # evidence the goal is in the WRONG room.
+                        # [SR-L1 P0-D rev2] Same tighter gate as segment2d
+                        # branch: demote whenever room_map has ANY activation
+                        # and the target room is inactive at the object's
+                        # projected location. See rev2 comment above for
+                        # rationale (fixes the 235-step STOP-at-distractor
+                        # failure mode).
+                        demote = False
+                        if self.goal_room is not None and self.goal_room in self.rooms:
+                            room_idx = self.rooms.index(self.goal_room)
+                            if self.room_map[0].max().item() > 0:
+                                map_x_r = int(self.map_size_cm/10 + goal_gps[0]*100/self.resolution)
+                                map_y_r = int(self.map_size_cm/10 + goal_gps[1]*100/self.resolution)
+                                if 0 <= map_x_r < self.map_size and 0 <= map_y_r < self.map_size:
+                                    window = 10
+                                    y0, y1 = max(0, map_y_r - window), min(self.map_size - 1, map_y_r + window + 1)
+                                    x0, x1 = max(0, map_x_r - window), min(self.map_size - 1, map_x_r + window + 1)
+                                    if self.room_map[0, room_idx, y0:y1, x0:x1].max().item() <= 0:
+                                        demote = True
+                                else:
+                                    demote = True
+
+                        if demote:
+                            # Don't accumulate in goal_gps_map — this keeps
+                            # found_goal_times below the STOP threshold.
+                            self.found_possible_goal = True
+                        else:
+                            thres = int(self.goal_merge_threshold * 100 / self.map_resolution)
+                            if 0 <= int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) < self.map_size and 0 <= int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) < self.map_size:
+                                goal_gps_map_local = self.goal_gps_map[max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) + thres, self.map_size - 1), max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) + thres, self.map_size - 1)]
+                                if goal_gps_map_local.max() > 0:
+                                    goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] = goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] + 1
+                                else:
+                                    self.goal_gps_map[min(max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution), 0), self.map_size), min(max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution), 0), self.map_size)] = 1
+                            self.found_possible_goal = False
                     
                     direction = temp_direction
                     distance = temp_distance
@@ -370,6 +488,25 @@ class SG_Nav_Agent():
             self.prob_array_room = self.co_occur_room_mtx[self.goal_idx[self.obj_goal]]
             self.prob_array_obj = self.co_occur_mtx[self.goal_idx[self.obj_goal]]
 
+        # [SR-L1 P1-C] periodic state log every 25 steps — cheap, and the
+        # only way to reconstruct "why did the agent STOP at step N" from
+        # a run log. Watch found_goal transitions and whether the target
+        # room's room_map activation ever becomes non-zero.
+        if self.total_steps % 25 == 0:
+            try:
+                target_room_any = 0.0
+                if self.goal_room is not None and self.goal_room in self.rooms:
+                    ridx = self.rooms.index(self.goal_room)
+                    target_room_any = float(self.room_map[0, ridx].max().item())
+                any_room_any = float(self.room_map[0].max().item())
+                print(f"[SR-L1 step {self.total_steps}] "
+                      f"found_goal={self.found_goal} "
+                      f"possible={self.found_possible_goal} "
+                      f"room_map(target={self.goal_room})={target_room_any:.2f} "
+                      f"room_map(any)={any_room_any:.2f}")
+            except Exception:
+                pass
+
         observations["depth"][observations["depth"]==0.5] = 100 # don't construct unprecise map with distance less than 0.5 m
         self.depth = observations["depth"]
         self.rgb = observations["rgb"][:,:,[2,1,0]]
@@ -378,7 +515,7 @@ class SG_Nav_Agent():
         self.scenegraph.set_agent(self)
         self.scenegraph.set_navigate_steps(self.navigate_steps)
         self.scenegraph.set_obj_goal(self.obj_goal, self.obj_goal_sg)
-        self.scenegraph.set_goal_room(self.goal_room)
+        self.scenegraph.goal_room = self.goal_room
         self.scenegraph.set_room_map(self.room_map)
         self.scenegraph.set_fbe_free_map(self.fbe_free_map)
         self.scenegraph.set_observations(observations)

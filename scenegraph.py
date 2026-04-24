@@ -244,7 +244,7 @@ Object pair(s):
         if self.obj_goal in self.threshold_list:
             self.cfg.obj_min_detections = self.threshold_list[self.obj_goal]
 
-    def set_room_goal(self,goal_room):
+    def set_goal_room(self, goal_room):
         self.goal_room = goal_room
 
     def set_navigate_steps(self, navigate_steps):
@@ -779,11 +779,25 @@ Object pair(s):
                     predict_room_node = room_node
                     break
             
-            # Constrained room not yet discovered. 
-            # Return None so the agent continues exploration via Layer 1 & 2 scoring
-            # (they still include room co-occurrence signals).
+            # [SR-L1 P0-C] Constrained room not yet discovered in the scene graph.
+            # Previous behavior: return None, losing the entire Layer-3 goal-
+            # prediction signal until the target room was found — this starved
+            # early-exploration frontier scoring of a useful cue.
+            # New behavior: fall back to the original SG-Nav LLM room predictor,
+            # which picks the most plausible *already-discovered* room for the
+            # goal category. This preserves exploration signal while the room-
+            # aware frontier boost (scenegraph.score) continues to pull the
+            # agent toward the true target room as soon as it's detected.
             if predict_room_node is None:
-                return None
+                prompt = self.prompt_room_predict.format(goal, room_node_text)
+                response = self.get_llm_response(prompt=prompt)
+                response = response.lower()
+                for room_node in self.room_nodes:
+                    if (len(room_node.group_nodes) > 0
+                        and room_node.caption.lower() in response):
+                        predict_room_node = room_node
+                if predict_room_node is None:
+                    return None
         else:
             # --- ORIGINAL behavior: ask LLM which room contains the goal ---
             prompt = self.prompt_room_predict.format(goal, room_node_text)
@@ -927,27 +941,45 @@ Object pair(s):
             scores += score
         
         # --- SR-ObjectNav-L1 extension: explicit room-aware boost ---
+        # [SR-L1 P0-A] Switched from ADDITIVE (scores[i] += alpha * presence,
+        # max gain ~+2) to MULTIPLICATIVE. The additive version was drowned
+        # out by the Layer-1/2 scores which span roughly [-30, +30], so the
+        # room constraint had ~0 effect on ranking. The multiplicative form
+        # scales the base score by (1 + alpha * exp(-d/sigma)), so a frontier
+        # at the target room center is boosted by (1 + alpha) times; with
+        # alpha=2 that's 3x, matching the project plan's soft-weighting spec.
+        # Distance is measured from each frontier to the *nearest* cell where
+        # the target room has been detected (not just a local neighborhood),
+        # giving a smooth gradient even when the room is several meters away.
         if self.goal_room is not None and self.goal_room in self.rooms:
             room_idx = self.rooms.index(self.goal_room)
-            # Convert sigma from meters to map cells (map_resolution is cm/cell)
-            # sigma_cells = sigma_meters * 100 / map_resolution
-            # Note: frontier coords are in map-cell units, so we compute distances 
-            # to the target room's room_map activation peaks
-            
-            # Find all cells where target room is detected
             target_room_map = self.agent.room_map[0, room_idx].cpu().numpy()
-            
-            for i, loc in enumerate(frontier_locations_16):
-                # Soft proximity: check a local neighborhood
-                window = 12  # ~60 cm radius at map_resolution=5cm
-                y0 = max(0, loc[0] - window)
-                y1 = min(self.agent.map_size - 1, loc[0] + window + 1)
-                x0 = max(0, loc[1] - window)
-                x1 = min(self.agent.map_size - 1, loc[1] + window + 1)
-                sub = target_room_map[y0:y1, x0:x1]
-                
-                room_presence = float(sub.max())  # 0 if no target-room detection here
-                scores[i] += self.room_boost_alpha * room_presence
+
+            # All map cells where the target room has been detected so far.
+            # Threshold 0.1 filters out near-zero numerical noise from the
+            # semantic mapping accumulator.
+            room_cells = np.argwhere(target_room_map > 0.1)
+
+            if len(room_cells) > 0:
+                # Convert sigma from meters to map cells.
+                # map_resolution is cm/cell, so meters -> cells = m * 100 / res.
+                sigma_cells = self.room_boost_sigma * 100.0 / self.agent.map_resolution
+
+                boost = np.ones(num_16_frontiers)
+                for i, loc in enumerate(frontier_locations_16):
+                    d = np.linalg.norm(room_cells - loc, axis=1).min()
+                    boost[i] = 1.0 + self.room_boost_alpha * np.exp(-d / sigma_cells)
+
+                # Layer-1/2 scores can be negative; directly multiplying would
+                # flip signs and invert the ranking. Shift to non-negative first,
+                # apply the boost, then shift back so relative ordering between
+                # already-positive frontiers is preserved and negative-scoring
+                # frontiers don't accidentally become top-ranked.
+                baseline = scores.min()
+                scores = (scores - baseline + 1e-3) * boost + baseline
+            # If the target room has not been detected anywhere yet, fall
+            # through with original scores — Layer-1 room co-occurrence still
+            # provides useful exploration signal.
         # --- end extension ---
 
         return scores

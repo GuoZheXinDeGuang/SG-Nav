@@ -1,24 +1,16 @@
 """
-Generate SR-ObjectNav-L1 episodes: room-constrained ObjectNav episodes from MP3D.
-Output format is compatible with Habitat's ObjectNav dataset loader.
+SR-ObjectNav-L1: room-constrained ObjectNav, built on top of Habitat MP3D episodes.
+Uses .house file ONLY to look up which region each goal object is in.
 """
-
-import json
-import gzip
-import os
-import random
-import numpy as np
+import json, gzip, os, glob, random
 from pathlib import Path
-import habitat
-from habitat.core.registry import registry
-from habitat.tasks.nav.nav import NavigationEpisode
+from collections import defaultdict
 
-# --- Configuration ---
-MP3D_SCENES_DIR = "/path/to/MatterPort3D/mp3d"   # contains e.g. 2azQ1b91cZZ/2azQ1b91cZZ.glb
-ORIGINAL_OBJECTNAV_JSON = "/path/to/objectnav/mp3d/v1/val/val.json.gz"
+# --- Config ---
+MP3D_SCENES_DIR = "MatterPort3D/mp3d"
+ORIGINAL_OBJECTNAV_DIR = "MatterPort3D/objectnav/mp3d/v1/val"
 OUTPUT_PATH = "data/sr_objectnav_l1/val.json.gz"
 
-# Target (category, room) pairs — see Section 3.2 of the plan
 TARGET_PAIRS = [
     ("chair",  "bedroom"),
     ("chair",  "living room"),
@@ -30,200 +22,238 @@ TARGET_PAIRS = [
     ("table",  "dining room"),
 ]
 
-NUM_PER_PAIR_PER_SCENE = 2     # keep small; multiply by pairs × scenes
-MIN_START_TO_GOAL_DIST = 5.0   # meters (geodesic)
+NUM_PER_PAIR_PER_SCENE = 2
 RANDOM_SEED = 42
 
-# MP3D region label → SG-Nav room string (VERIFY against your .house files)
-MP3D_TO_SGNAV_ROOM = {
-    'b': 'bedroom',
-    'l': 'living room',
+# MP3D region label → room name. Full list per MP3D docs:
+# https://github.com/niessner/Matterport/blob/master/data_organization.md#house-file-format
+MP3D_TO_ROOM = {
     'a': 'bathroom',
-    'k': 'kitchen',
+    'b': 'bedroom',
+    'c': 'closet',
     'd': 'dining room',
-    'o': 'office room',
-    'g': 'gym',
-    'r': 'lounge',
-    'u': 'laundry room',
+    'e': 'entryway',          # foyer/lobby
+    'f': 'family room',
+    'g': 'garage',
+    'h': 'hallway',
+    'i': 'library',
+    'j': 'laundry room',
+    'k': 'kitchen',
+    'l': 'living room',
+    'm': 'meeting room',
+    'n': 'lounge',
+    'o': 'office',
+    'p': 'porch',             # terrace/deck
+    'r': 'recreation',        # game room
+    's': 'stairs',
+    't': 'toilet',            # note: separate from bathroom in MP3D
+    'u': 'utility room',
+    'v': 'tv room',
+    'w': 'workout room',      # gym
+    'x': 'outdoor',
+    'y': 'balcony',
+    'z': 'other room',
 }
 
 
-def load_house_file(scene_id, mp3d_scenes_dir):
-    """Parse the .house file for a scene. Returns regions and objects."""
-    house_path = Path(mp3d_scenes_dir) / scene_id / f"{scene_id}.house"
-    if not house_path.exists():
-        return None, None
-    
-    regions = []   # list of dicts with fields: idx, label, bbox_min, bbox_max, level
-    objects = []   # list of dicts with fields: idx, category, bbox_min, bbox_max, region_idx
-    
-    with open(house_path, 'r') as f:
+def load_house(scene_id):
+    """Returns dict: object_id -> region_label_string (e.g. 'bedroom')."""
+    p = Path(MP3D_SCENES_DIR) / scene_id / f"{scene_id}.house"
+    if not p.exists():
+        return None
+
+    regions = {}   # region_idx -> (label, bbox_min, bbox_max)
+    obj_to_region = {}   # object_idx -> region_idx
+
+    with open(p, 'r') as f:
         for line in f:
             parts = line.strip().split()
             if not parts:
                 continue
             tag = parts[0]
-            # Region line: R region_idx level_idx 0 0 label px py pz x0 y0 z0 x1 y1 z1 ...
             if tag == 'R' and len(parts) >= 15:
-                regions.append({
-                    'idx': int(parts[1]),
-                    'level': int(parts[2]),
-                    'label': parts[5].strip('"'),
-                    'bbox_min': [float(parts[9]), float(parts[10]), float(parts[11])],
-                    'bbox_max': [float(parts[12]), float(parts[13]), float(parts[14])],
-                })
-            # Object line: O object_idx region_idx 0 category_idx px py pz x0 y0 z0 x1 y1 z1 ...
+                idx = int(parts[1])
+                label = parts[5].strip('"')
+                bmin = [float(parts[9]), float(parts[10]), float(parts[11])]
+                bmax = [float(parts[12]), float(parts[13]), float(parts[14])]
+                regions[idx] = (label, bmin, bmax)
             elif tag == 'O' and len(parts) >= 14:
-                objects.append({
-                    'idx': int(parts[1]),
-                    'region_idx': int(parts[2]),
-                    'category_idx': int(parts[4]),
-                    'position': [float(parts[5]), float(parts[6]), float(parts[7])],
-                    'bbox_min': [float(parts[8]), float(parts[9]), float(parts[10])],
-                    'bbox_max': [float(parts[11]), float(parts[12]), float(parts[13])],
-                })
-    
-    return regions, objects
+                obj_idx = int(parts[1])
+                reg_idx = int(parts[2])
+                obj_to_region[obj_idx] = reg_idx
+    return regions, obj_to_region
 
 
-def load_category_mapping(scene_id, mp3d_scenes_dir):
-    """MP3D has a category_mapping.tsv that maps category_idx to category name."""
-    # Each scene's category index maps to human-readable category via a global mapping.
-    # You need matterport3d's category_mapping.tsv (ships with the dataset).
-    # This is dataset-specific. Placeholder — adapt to your data layout.
-    mapping_path = Path(mp3d_scenes_dir).parent / "category_mapping.tsv"
-    mapping = {}
-    if mapping_path.exists():
-        with open(mapping_path, 'r') as f:
-            next(f)  # header
-            for line in f:
-                parts = line.strip().split('\t')
-                if len(parts) >= 2:
-                    idx = int(parts[0])
-                    name = parts[1].lower()
-                    mapping[idx] = name
-    return mapping
+def point_in_bbox(p, bmin, bmax, margin=0.0):
+    return all(bmin[i] - margin <= p[i] <= bmax[i] + margin for i in range(3))
 
 
-def get_objects_in_room_of_type(regions, objects, cat_mapping, obj_category, room_type):
-    """Return list of (obj, region) tuples matching (category, room_type)."""
-    matches = []
-    for region in regions:
-        mp3d_label = region['label']
-        sg_room = MP3D_TO_SGNAV_ROOM.get(mp3d_label)
-        if sg_room != room_type:
-            continue
-        # Find objects in this region with the target category
-        for obj in objects:
-            if obj['region_idx'] != region['idx']:
-                continue
-            cat_name = cat_mapping.get(obj['category_idx'], '')
-            if obj_category in cat_name:
-                matches.append((obj, region))
-    return matches
-
-
-def point_in_bbox(point, bbox_min, bbox_max):
-    return all(bbox_min[i] <= point[i] <= bbox_max[i] for i in range(3))
-
-
-def sample_start_position(regions, avoid_region_idx, sim=None):
-    """Sample a navigable point NOT in the target room.
-    
-    For a full implementation, use habitat_sim.PathFinder to sample navigable points.
-    Placeholder here: sample inside another room's bbox center with small perturbation.
+def find_region_by_position(position, regions, xz_margin=0.3):
+    """Fallback: match a 3D point to a region by bbox. Used when object_id mapping fails.
+    We relax the Y (height) check because MP3D region bboxes sometimes don't include floor/ceiling cleanly.
     """
-    candidate_regions = [r for r in regions 
-                         if r['idx'] != avoid_region_idx 
-                         and MP3D_TO_SGNAV_ROOM.get(r['label']) is not None]
-    if not candidate_regions:
-        return None
-    chosen = random.choice(candidate_regions)
-    center = [(chosen['bbox_min'][i] + chosen['bbox_max'][i]) / 2 for i in range(3)]
-    # Add small noise
-    center[0] += random.uniform(-0.5, 0.5)
-    center[2] += random.uniform(-0.5, 0.5)
-    return center
+    candidates = []
+    for ridx, (label, bmin, bmax) in regions.items():
+        # XZ check with margin; Y check loose
+        if (bmin[0] - xz_margin <= position[0] <= bmax[0] + xz_margin and
+            bmin[2] - xz_margin <= position[2] <= bmax[2] + xz_margin and
+            bmin[1] - 1.0 <= position[1] <= bmax[1] + 1.0):
+            candidates.append(ridx)
+    return candidates[0] if len(candidates) == 1 else None  # ambiguous → reject
 
 
-def generate_episodes(scene_list):
+def generate():
     random.seed(RANDOM_SEED)
-    episodes = []
-    episode_id = 0
-    
-    for scene_id in scene_list:
-        regions, objects = load_house_file(scene_id, MP3D_SCENES_DIR)
-        if regions is None:
-            print(f"[WARN] No .house file for {scene_id}, skipping.")
+
+    # Load original episode files
+    content_files = sorted(glob.glob(os.path.join(ORIGINAL_OBJECTNAV_DIR, 'content', '*.json.gz')))
+    print(f"Found {len(content_files)} scene files")
+
+    with gzip.open(os.path.join(ORIGINAL_OBJECTNAV_DIR, 'val.json.gz'), 'rt') as f:
+        top_level = json.load(f)
+
+    all_new_episodes = []
+    stats = defaultdict(int)        # (cat, room) -> count
+    scene_stats = defaultdict(int)  # scene -> num episodes generated
+
+    for cf in content_files:
+        scene_id = Path(cf).stem.replace('.json', '')  # 2azQ1b91cZZ
+        with gzip.open(cf, 'rt') as f:
+            scene_data = json.load(f)
+
+        house_info = load_house(scene_id)
+        if house_info is None:
+            print(f"[WARN] No .house for {scene_id}, skip")
             continue
-        
-        cat_mapping = load_category_mapping(scene_id, MP3D_SCENES_DIR)
-        
-        for obj_category, room_type in TARGET_PAIRS:
-            matches = get_objects_in_room_of_type(
-                regions, objects, cat_mapping, obj_category, room_type
-            )
+        regions, obj_to_region = house_info
+
+        # Build: (category, room) -> list of goal instances
+        goals_by_cat_room = defaultdict(list)
+        goals_by_category = scene_data.get('goals_by_category', {})
+
+        for gkey, goal_list in goals_by_category.items():
+            # gkey looks like "2azQ1b91cZZ.glb_cabinet"
+            if not isinstance(goal_list, list):
+                goal_list = [goal_list]
+            for goal in goal_list:
+                cat = goal['object_category']
+                # Find region for this goal
+                obj_id = goal.get('object_id')
+                reg_idx = obj_to_region.get(obj_id) if obj_id is not None else None
+                if reg_idx is None:
+                    # Fallback: match by position
+                    reg_idx = find_region_by_position(goal['position'], regions)
+                if reg_idx is None or reg_idx not in regions:
+                    continue
+                label_char = regions[reg_idx][0]
+                room = MP3D_TO_ROOM.get(label_char)
+                if room is None:
+                    continue
+                goals_by_cat_room[(cat, room)].append({
+                    'goal': goal,
+                    'region_idx': reg_idx,
+                    'region_bbox': (regions[reg_idx][1], regions[reg_idx][2]),
+                })
+
+        # Index episodes by category for quick start-position lookup
+        eps_by_cat = defaultdict(list)
+        for ep in scene_data['episodes']:
+            eps_by_cat[ep['object_category']].append(ep)
+
+        # For each (category, room) pair we want, generate episodes
+        for cat, room in TARGET_PAIRS:
+            matches = goals_by_cat_room.get((cat, room), [])
             if not matches:
                 continue
-            
-            # Collect all target positions (any of these counts as success)
-            all_target_positions = [m[0]['position'] for m in matches]
-            target_region = matches[0][1]   # use first match's region as the "target room"
-            
-            # Collect distractors (same category, different rooms)
-            distractors = []
-            for obj in objects:
-                cat_name = cat_mapping.get(obj['category_idx'], '')
-                if obj_category in cat_name and obj['region_idx'] != target_region['idx']:
-                    distractors.append(obj['position'])
-            
-            for k in range(min(NUM_PER_PAIR_PER_SCENE, len(matches))):
-                start_pos = sample_start_position(regions, target_region['idx'])
-                if start_pos is None:
-                    continue
-                
-                episodes.append({
-                    "episode_id": f"sr_l1_{episode_id:05d}",
-                    "scene_id": f"mp3d/{scene_id}/{scene_id}.glb",
-                    "start_position": start_pos,
-                    "start_rotation": [0, 0, 0, 1],
-                    "object_category": obj_category,
+            src_eps = eps_by_cat.get(cat, [])
+            if not src_eps:
+                continue
+
+            # Target goal positions (all goals of THIS cat in THIS room)
+            target_positions = [m['goal']['position'] for m in matches]
+            # [SR-L1 P1-B] Collect bboxes for ALL matching rooms, not just the
+            # first. A scene can have e.g. 2 bedrooms, each with a chair — the
+            # old code recorded only bedroom #1's bbox as goal_room_bbox, so
+            # stopping near a chair in bedroom #2 would be counted as
+            # "wrong room" and Room-Accuracy was systematically underestimated.
+            target_region_indices = list({m['region_idx'] for m in matches})
+            target_room_bboxes = [
+                (regions[idx][1], regions[idx][2]) for idx in target_region_indices
+            ]
+
+            # Distractors: same category, different room
+            all_cat_goals = []
+            for gkey, glist in goals_by_category.items():
+                if isinstance(glist, list):
+                    all_cat_goals.extend(g for g in glist if g['object_category'] == cat)
+            distractor_positions = []
+            for g in all_cat_goals:
+                if g['position'] not in target_positions:
+                    distractor_positions.append(g['position'])
+
+            # Pick start positions from original episodes where start is NOT in
+            # ANY of the target rooms (else episode is trivial).
+            valid_starts = []
+            for ep in src_eps:
+                sp = ep['start_position']
+                in_target = any(
+                    point_in_bbox(sp, bmin, bmax, margin=0.3)
+                    for bmin, bmax in target_room_bboxes
+                )
+                if not in_target:
+                    valid_starts.append(ep)
+            if not valid_starts:
+                continue
+
+            random.shuffle(valid_starts)
+            for i, ep in enumerate(valid_starts[:NUM_PER_PAIR_PER_SCENE]):
+                new_ep = {
+                    "episode_id": f"sr_l1_{scene_id}_{cat}_{room}_{i}".replace(' ', '_'),
+                    "scene_id": ep['scene_id'],
+                    "start_position": ep['start_position'],
+                    "start_rotation": ep['start_rotation'],
+                    "object_category": cat,
+                    "goals": [{"position": p, "radius": None} for p in target_positions],
                     "info": {
-                        "room_constraint": room_type,              
-                        "goal_positions": all_target_positions,
-                        "goal_room_bbox": {
-                            "min": target_region['bbox_min'],
-                            "max": target_region['bbox_max'],
+                        "room_constraint": room,
+                        # [SR-L1 P1-B] goal_room_bbox is now a LIST of bboxes,
+                        # one per target-room instance. Evaluation must check
+                        # point-in-ANY-bbox. Single-bbox dict format is kept
+                        # as `goal_room_bbox_legacy` for any older scripts.
+                        "goal_room_bbox": [
+                            {"min": list(bmin), "max": list(bmax)}
+                            for bmin, bmax in target_room_bboxes
+                        ],
+                        "goal_room_bbox_legacy": {
+                            "min": list(target_room_bboxes[0][0]),
+                            "max": list(target_room_bboxes[0][1]),
                         },
-                        "distractor_positions": distractors,
+                        "distractor_positions": distractor_positions,
+                        "geodesic_distance": ep['info'].get('geodesic_distance'),
                     },
-                    "goals": [{"position": p, "radius": None} 
-                            for p in all_target_positions],
-                })
-                episode_id += 1
-    
-    return episodes
+                }
+                all_new_episodes.append(new_ep)
+                stats[(cat, room)] += 1
+                scene_stats[scene_id] += 1
+
+    print(f"\nTotal episodes: {len(all_new_episodes)}")
+    print("\nPer-pair counts:")
+    for k, v in sorted(stats.items()):
+        print(f"  {k}: {v}")
+    print("\nPer-scene counts:")
+    for k, v in sorted(scene_stats.items()):
+        print(f"  {k}: {v}")
+
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    output = {
+        "episodes": all_new_episodes,
+        "category_to_task_category_id": top_level.get("category_to_task_category_id", {}),
+        "category_to_mp3d_category_id": top_level.get("category_to_mp3d_category_id", {}),
+    }
+    with gzip.open(OUTPUT_PATH, 'wt') as f:
+        json.dump(output, f)
+    print(f"\nSaved to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
-    # Read original val.json.gz to get list of MP3D scenes used for ObjectNav val
-    with gzip.open(ORIGINAL_OBJECTNAV_JSON, 'rt') as f:
-        original = json.load(f)
-    
-    val_scenes = list(set([ep['scene_id'].split('/')[-1].replace('.glb', '') 
-                           for ep in original['episodes']]))
-    print(f"Found {len(val_scenes)} val scenes")
-    
-    episodes = generate_episodes(val_scenes[:10])  # start small!
-    print(f"Generated {len(episodes)} SR-ObjectNav-L1 episodes")
-    
-    # Save in Habitat-compatible format
-    output = {
-        "episodes": episodes,
-        "category_to_task_category_id": original.get("category_to_task_category_id", {}),
-        "category_to_mp3d_category_id": original.get("category_to_mp3d_category_id", {}),
-    }
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    with gzip.open(OUTPUT_PATH, 'wt') as f:
-        json.dump(output, f)
-    print(f"Saved to {OUTPUT_PATH}")
+    generate()
