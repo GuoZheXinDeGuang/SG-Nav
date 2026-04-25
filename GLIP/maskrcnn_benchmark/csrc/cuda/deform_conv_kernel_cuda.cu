@@ -62,7 +62,6 @@
 
 
 #include <ATen/ATen.h>
-#include <THC/THCAtomics.cuh>
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
@@ -263,7 +262,7 @@ void deformable_im2col(
   int num_kernels = channels * height_col * width_col * parallel_imgs;
   int channel_per_deformable_group = channels / deformable_group;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_im.scalar_type(), "deformable_im2col_gpu", ([&] {
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -357,7 +356,7 @@ void deformable_col2im(
   int num_kernels = channels * ksize_h * ksize_w * height_col * width_col * parallel_imgs;
   int channel_per_deformable_group = channels / deformable_group;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_col.scalar_type(), "deformable_col2im_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -455,7 +454,7 @@ void deformable_col2im_coord(
   int num_kernels = height_col * width_col * 2 * ksize_h * ksize_w * deformable_group * parallel_imgs;
   int channel_per_deformable_group = channels * ksize_h * ksize_w / deformable_group;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_col.scalar_type(), "deformable_col2im_coord_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
@@ -785,7 +784,7 @@ void modulated_deformable_im2col_cuda(
   const int channel_per_deformable_group = channels / deformable_group;
   const int num_kernels = channels * batch_size * height_col * width_col;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_im.scalar_type(), "modulated_deformable_im2col_gpu", ([&] {
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -817,7 +816,7 @@ void modulated_deformable_col2im_cuda(
   const int channel_per_deformable_group = channels / deformable_group;
   const int num_kernels = channels * kernel_h * kernel_w * batch_size * height_col * width_col;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_col.scalar_type(), "modulated_deformable_col2im_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -850,7 +849,7 @@ void modulated_deformable_col2im_coord_cuda(
   const int num_kernels = batch_size * height_col * width_col * 2 * kernel_h * kernel_w * deformable_group;
   const int channel_per_deformable_group = channels * kernel_h * kernel_w / deformable_group;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data_col.scalar_type(), "modulated_deformable_col2im_coord_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();

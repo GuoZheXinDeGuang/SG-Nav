@@ -10,7 +10,6 @@
 
 
 #include <ATen/ATen.h>
-#include <THC/THCAtomics.cuh>
 #include <stdio.h>
 #include <math.h>
 #include <algorithm>
@@ -289,7 +288,7 @@ void DeformablePSROIPoolForward(const at::Tensor data,
   const int num_classes = no_trans ? 1 : channels_trans / 2;
   const int channels_each_class = no_trans ? output_dim : output_dim / num_classes;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       data.scalar_type(), "deformable_psroi_pool_forward", ([&] {
         const scalar_t *bottom_data = data.data_ptr<scalar_t>();
         const scalar_t *bottom_rois = bbox.data_ptr<scalar_t>();
@@ -340,7 +339,7 @@ void DeformablePSROIPoolBackwardAcc(const at::Tensor out_grad,
   const int num_classes = no_trans ? 1 : channels_trans / 2;
   const int channels_each_class = no_trans ? output_dim : output_dim / num_classes;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES(
       out_grad.scalar_type(), "deformable_psroi_pool_backward_acc", ([&] {
         const scalar_t *top_diff = out_grad.data_ptr<scalar_t>();
         const scalar_t *bottom_data = data.data_ptr<scalar_t>();
