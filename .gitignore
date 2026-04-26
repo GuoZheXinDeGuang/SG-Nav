@@ -1,6 +1,8 @@
 **/__pycache__/
 glip_large_model.pth
 /data
+/MatterPort3D/
+/MatterPort3D.zip
 /GLIP/build
 /GLIP/maskrcnn_benchmark.egg-info
 /segment_anything/segment_anything.egg-info/

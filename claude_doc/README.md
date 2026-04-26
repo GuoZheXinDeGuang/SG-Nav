@@ -21,6 +21,7 @@ Habitat episode
 | [01_terms_verbs_engines_keys.md](01_terms_verbs_engines_keys.md) | 名词、动词、引擎、点火钥匙 |
 | [02_modules_and_call_graph.md](02_modules_and_call_graph.md) | 主要模块与 call graph |
 | [03_rewrite_notes.md](03_rewrite_notes.md) | 重写时应保留/替换的边界 |
+| [04_install_and_usage.md](04_install_and_usage.md) | 环境安装、踩坑修正与运行命令 |
 | [top10/01_SG_Nav_py.md](top10/01_SG_Nav_py.md) | 主 agent、主循环、目标选择、局部规划 |
 | [top10/02_scenegraph_py.md](top10/02_scenegraph_py.md) | 在线 3D scene graph 与 LLM/VLM 推理 |
 | [top10/03_utils_fmm_mapping_py.md](top10/03_utils_fmm_mapping_py.md) | RGB-D 到 2D 栅格地图的投影 |
