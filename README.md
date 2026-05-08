@@ -1,4 +1,6 @@
-# DS-GA 3001 Project: Using Scene Graph for VLM-based Zero-shot Object Navigation
+# DS-GA 3001 Project: Using Scene Graph for VLM-based Zero-shot Object Navigation\
+
+Original Paper: https://arxiv.org/abs/2410.08189
 
 ## Installation
 
