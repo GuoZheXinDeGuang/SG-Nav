@@ -1,10 +1,4 @@
-# DS-GA 3001 Project: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation
-
-
-## Method 
-
-Method Pipeline:
-![overview](./assets/pipeline.png)
+# DS-GA 3001 Project: Using Scene Graph for VLM-based Zero-shot Object Navigation
 
 ## Installation
 
